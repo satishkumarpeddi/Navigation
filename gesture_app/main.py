@@ -5,34 +5,33 @@ from mediapipe.tasks.python import vision
 import pyautogui
 import time
 import math
+from collections import deque
+import winsound
 
-# Cooldown to prevent spamming actions
+# Configuration
+COOLDOWN = 1.5  # seconds
+STABILIZATION_FRAMES = 8  # Require N consecutive identical frames to trigger an action
+
+# State tracking
 last_action_time = 0
-COOLDOWN = 2.0  # seconds
+last_action_name = ""
+gesture_history = deque(maxlen=STABILIZATION_FRAMES)
 
 def get_distance(p1, p2):
     return math.hypot(p1.x - p2.x, p1.y - p2.y)
 
 def count_fingers(hand_landmarks):
-    """
-    Returns a list of 5 booleans representing which fingers are up.
-    Order: Thumb, Index, Middle, Ring, Pinky
-    hand_landmarks is a list of NormalizedLandmark objects with x, y, z properties.
-    """
     fingers = []
     
-    # Thumb: Calculate distance from tip (4) to pinky mcp (17) vs ip (3) to pinky mcp
+    # Thumb: Calculate distance from tip to pinky mcp vs ip to pinky mcp
     thumb_tip = hand_landmarks[4]
     thumb_ip = hand_landmarks[3]
     pinky_mcp = hand_landmarks[17]
-    dist_tip = get_distance(thumb_tip, pinky_mcp)
-    dist_ip = get_distance(thumb_ip, pinky_mcp)
-    fingers.append(dist_tip > dist_ip)
+    fingers.append(get_distance(thumb_tip, pinky_mcp) > get_distance(thumb_ip, pinky_mcp))
 
     # 4 Fingers
     tip_ids = [8, 12, 16, 20]
     for id in tip_ids:
-        # If tip is higher (y is smaller) than the PIP joint, finger is up
         if hand_landmarks[id].y < hand_landmarks[id - 2].y:
             fingers.append(True)
         else:
@@ -41,10 +40,6 @@ def count_fingers(hand_landmarks):
     return fingers
 
 def recognize_gesture(fingers):
-    """
-    fingers: [Thumb, Index, Middle, Ring, Pinky] booleans
-    Returns gesture name
-    """
     up_count = sum(fingers)
     
     if up_count == 5:
@@ -52,61 +47,80 @@ def recognize_gesture(fingers):
     elif up_count == 0:
         return "FIST"
     elif fingers == [False, True, True, False, False]:
-        return "PEACE" # Index and Middle up
+        return "PEACE"
     elif fingers == [True, True, False, False, False]:
-        return "L_SIGN" # Thumb and Index up
+        return "L_SIGN"
     
     return "UNKNOWN"
 
 def execute_action(gesture):
-    global last_action_time
+    global last_action_time, last_action_name
+    
     if time.time() - last_action_time < COOLDOWN:
-        return # Still in cooldown
+        return False
         
+    action_triggered = False
+    
     if gesture == "OPEN_PALM":
-        print("Action: MAXIMIZE Window")
+        last_action_name = "MAXIMIZED"
         pyautogui.hotkey('win', 'up')
-        last_action_time = time.time()
+        action_triggered = True
         
     elif gesture == "FIST":
-        print("Action: MINIMIZE Window")
+        last_action_name = "MINIMIZED"
         pyautogui.hotkey('win', 'down')
-        last_action_time = time.time()
+        action_triggered = True
         
     elif gesture == "PEACE":
-        print("Action: CLOSE Window")
+        last_action_name = "CLOSED"
         pyautogui.hotkey('alt', 'f4')
-        last_action_time = time.time()
+        action_triggered = True
         
     elif gesture == "L_SIGN":
-        print("Action: OPEN FILE EXPLORER")
+        last_action_name = "OPENED EXPLORER"
         pyautogui.hotkey('win', 'e')
+        action_triggered = True
+
+    if action_triggered:
         last_action_time = time.time()
+        # Play a soft system sound
+        winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
+        print(f"Action Executed: {last_action_name}")
+        
+    return action_triggered
 
 def draw_landmarks(img, hand_landmarks):
     h, w, _ = img.shape
-    # Draw points
     for idx, lm in enumerate(hand_landmarks):
         cx, cy = int(lm.x * w), int(lm.y * h)
-        cv2.circle(img, (cx, cy), 5, (255, 0, 0), cv2.FILLED)
+        cv2.circle(img, (cx, cy), 5, (200, 200, 200), cv2.FILLED)
         
-    # Connections (simplified list of pairs)
     connections = [
-        (0, 1), (1, 2), (2, 3), (3, 4), # Thumb
-        (0, 5), (5, 6), (6, 7), (7, 8), # Index
-        (5, 9), (9, 10), (10, 11), (11, 12), # Middle
-        (9, 13), (13, 14), (14, 15), (15, 16), # Ring
-        (13, 17), (0, 17), (17, 18), (18, 19), (19, 20) # Pinky
+        (0, 1), (1, 2), (2, 3), (3, 4), 
+        (0, 5), (5, 6), (6, 7), (7, 8), 
+        (5, 9), (9, 10), (10, 11), (11, 12), 
+        (9, 13), (13, 14), (14, 15), (15, 16), 
+        (13, 17), (0, 17), (17, 18), (18, 19), (19, 20) 
     ]
     for connection in connections:
         point1 = hand_landmarks[connection[0]]
         point2 = hand_landmarks[connection[1]]
         cx1, cy1 = int(point1.x * w), int(point1.y * h)
         cx2, cy2 = int(point2.x * w), int(point2.y * h)
-        cv2.line(img, (cx1, cy1), (cx2, cy2), (0, 255, 0), 2)
+        cv2.line(img, (cx1, cy1), (cx2, cy2), (255, 180, 50), 2)
+
+def draw_overlay_text(img, text, pos, font_scale=0.7, color=(255, 255, 255), thickness=2, bg_color=(0,0,0)):
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
+    x, y = pos
+    # Draw semi-transparent background
+    cv2.rectangle(img, (x-5, y-text_size[1]-10), (x+text_size[0]+5, y+5), bg_color, cv2.FILLED)
+    # Draw text
+    cv2.putText(img, text, pos, font, font_scale, color, thickness, cv2.LINE_AA)
 
 def main():
-    # Setup MediaPipe Hand Landmarker Task
+    global gesture_history, last_action_time
+    
     base_options = python.BaseOptions(model_asset_path='hand_landmarker.task')
     options = vision.HandLandmarkerOptions(
         base_options=base_options,
@@ -115,53 +129,85 @@ def main():
     detector = vision.HandLandmarker.create_from_options(options)
 
     cap = cv2.VideoCapture(0)
-    
     if not cap.isOpened():
         print("Error: Could not open webcam.")
         return
 
-    print("Starting Gesture Control.")
-    print("Gestures:")
-    print(" - Open Palm -> Maximize Window")
-    print(" - Fist -> Minimize Window")
-    print(" - Peace Sign (Index + Middle) -> Close Window")
-    print(" - L-Sign (Thumb + Index) -> Open File Explorer")
-    print("Press 'q' to quit.")
+    # To calculate FPS
+    prev_time = 0
 
     while True:
         success, img = cap.read()
         if not success:
             continue
             
-        # Flip image horizontally for a mirrored view
         img = cv2.flip(img, 1)
+        h, w, _ = img.shape
         
-        # Convert BGR to RGB for MediaPipe
+        # FPS Calculation
+        curr_time = time.time()
+        fps = 1 / (curr_time - prev_time)
+        prev_time = curr_time
+        
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
         
         detection_result = detector.detect(mp_image)
         
-        gesture_name = "UNKNOWN"
+        current_gesture = "UNKNOWN"
         
         if detection_result.hand_landmarks:
             for hand_landmarks_list in detection_result.hand_landmarks:
                 draw_landmarks(img, hand_landmarks_list)
                 
                 fingers = count_fingers(hand_landmarks_list)
-                gesture_name = recognize_gesture(fingers)
-                
-                if gesture_name != "UNKNOWN":
-                    execute_action(gesture_name)
-                    
-        # Display Gesture on Screen
-        cv2.putText(img, f"Gesture: {gesture_name}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 
-                    1, (0, 255, 0), 2, cv2.LINE_AA)
-        status = "READY" if (time.time() - last_action_time >= COOLDOWN) else "COOLDOWN"
-        cv2.putText(img, f"Status: {status}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 
-                    1, (0, 0, 255) if status == "COOLDOWN" else (0, 255, 0), 2, cv2.LINE_AA)
+                current_gesture = recognize_gesture(fingers)
+                gesture_history.append(current_gesture)
+        else:
+            gesture_history.clear()
 
-        cv2.imshow("Hand Gesture System Control", img)
+        # Check for stabilized gesture
+        stabilized_gesture = "UNKNOWN"
+        if len(gesture_history) == STABILIZATION_FRAMES and len(set(gesture_history)) == 1:
+            stabilized_gesture = gesture_history[0]
+            
+        # Execute Action 
+        time_since_last = time.time() - last_action_time
+        if stabilized_gesture != "UNKNOWN":
+            execute_action(stabilized_gesture)
+
+        # -- UX Rendering --
+        
+        # 1. Top Left Status
+        status_text = "READY" if time_since_last >= COOLDOWN else f"COOLDOWN ({COOLDOWN - time_since_last:.1f}s)"
+        status_color = (0, 255, 0) if time_since_last >= COOLDOWN else (0, 0, 255)
+        draw_overlay_text(img, f"Status: {status_text}", (15, 35), color=status_color)
+        draw_overlay_text(img, f"Gesture: {stabilized_gesture}", (15, 75))
+        draw_overlay_text(img, f"FPS: {int(fps)}", (15, 115), font_scale=0.5, thickness=1)
+
+        # 2. Action Toast Banner (Center)
+        if time_since_last < 1.0:
+            # Fade out effect logic
+            alpha = max(0.0, 1.0 - time_since_last)
+            if alpha > 0:
+                text = f"ACTION: {last_action_name}"
+                font = cv2.FONT_HERSHEY_DUPLEX
+                scale = 1.2
+                thick = 3
+                t_size, _ = cv2.getTextSize(text, font, scale, thick)
+                tx, ty = (w - t_size[0]) // 2, (h // 2)
+                
+                # Make a safe overlay
+                overlay = img.copy()
+                cv2.rectangle(overlay, (tx-20, ty-t_size[1]-20), (tx+t_size[0]+20, ty+20), (50,200,50), cv2.FILLED)
+                cv2.putText(overlay, text, (tx, ty), font, scale, (255,255,255), thick, cv2.LINE_AA)
+                cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+
+        # 3. Bottom Instructions
+        instructions = "Palm=Max | Fist=Min | Peace=Close | L-Sign=Folder | 'q'=Quit"
+        draw_overlay_text(img, instructions, (15, h - 20), font_scale=0.5, thickness=1)
+
+        cv2.imshow("Hand Gesture Control - Pro UX", img)
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
