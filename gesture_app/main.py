@@ -9,13 +9,19 @@ from collections import deque
 import winsound
 
 # Configuration
-COOLDOWN = 1.5  # seconds
-STABILIZATION_FRAMES = 8  # Require N consecutive identical frames to trigger an action
+COOLDOWN = 1.5  
+STABILIZATION_FRAMES = 8 
+SMOOTHING = 5  # For mouse movement
 
 # State tracking
 last_action_time = 0
 last_action_name = ""
 gesture_history = deque(maxlen=STABILIZATION_FRAMES)
+
+# Mouse tracking
+pyautogui.FAILSAFE = False # Prevent crash if we move to corners
+SCREEN_W, SCREEN_H = pyautogui.size()
+ploc_x, ploc_y = 0, 0
 
 def get_distance(p1, p2):
     return math.hypot(p1.x - p2.x, p1.y - p2.y)
@@ -23,13 +29,11 @@ def get_distance(p1, p2):
 def count_fingers(hand_landmarks):
     fingers = []
     
-    # Thumb: Calculate distance from tip to pinky mcp vs ip to pinky mcp
     thumb_tip = hand_landmarks[4]
     thumb_ip = hand_landmarks[3]
     pinky_mcp = hand_landmarks[17]
     fingers.append(get_distance(thumb_tip, pinky_mcp) > get_distance(thumb_ip, pinky_mcp))
 
-    # 4 Fingers
     tip_ids = [8, 12, 16, 20]
     for id in tip_ids:
         if hand_landmarks[id].y < hand_landmarks[id - 2].y:
@@ -50,6 +54,10 @@ def recognize_gesture(fingers):
         return "PEACE"
     elif fingers == [True, True, False, False, False]:
         return "L_SIGN"
+    elif fingers == [False, True, False, False, False]:
+        return "INDEX_UP"
+    elif fingers == [True, False, False, False, False]:
+        return "THUMB_UP"
     
     return "UNKNOWN"
 
@@ -65,25 +73,25 @@ def execute_action(gesture):
         last_action_name = "MAXIMIZED"
         pyautogui.hotkey('win', 'up')
         action_triggered = True
-        
     elif gesture == "FIST":
         last_action_name = "MINIMIZED"
         pyautogui.hotkey('win', 'down')
         action_triggered = True
-        
     elif gesture == "PEACE":
         last_action_name = "CLOSED"
         pyautogui.hotkey('alt', 'f4')
         action_triggered = True
-        
     elif gesture == "L_SIGN":
         last_action_name = "OPENED EXPLORER"
         pyautogui.hotkey('win', 'e')
         action_triggered = True
+    elif gesture == "THUMB_UP":
+        last_action_name = "DOUBLE CLICKED"
+        pyautogui.doubleClick(_pause=False)
+        action_triggered = True
 
     if action_triggered:
         last_action_time = time.time()
-        # Play a soft system sound
         winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
         print(f"Action Executed: {last_action_name}")
         
@@ -113,19 +121,14 @@ def draw_overlay_text(img, text, pos, font_scale=0.7, color=(255, 255, 255), thi
     font = cv2.FONT_HERSHEY_SIMPLEX
     text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
     x, y = pos
-    # Draw semi-transparent background
     cv2.rectangle(img, (x-5, y-text_size[1]-10), (x+text_size[0]+5, y+5), bg_color, cv2.FILLED)
-    # Draw text
     cv2.putText(img, text, pos, font, font_scale, color, thickness, cv2.LINE_AA)
 
 def main():
-    global gesture_history, last_action_time
+    global gesture_history, last_action_time, ploc_x, ploc_y
     
     base_options = python.BaseOptions(model_asset_path='hand_landmarker.task')
-    options = vision.HandLandmarkerOptions(
-        base_options=base_options,
-        num_hands=1
-    )
+    options = vision.HandLandmarkerOptions(base_options=base_options, num_hands=1)
     detector = vision.HandLandmarker.create_from_options(options)
 
     cap = cv2.VideoCapture(0)
@@ -133,7 +136,6 @@ def main():
         print("Error: Could not open webcam.")
         return
 
-    # To calculate FPS
     prev_time = 0
 
     while True:
@@ -144,7 +146,6 @@ def main():
         img = cv2.flip(img, 1)
         h, w, _ = img.shape
         
-        # FPS Calculation
         curr_time = time.time()
         fps = 1 / (curr_time - prev_time)
         prev_time = curr_time
@@ -153,41 +154,48 @@ def main():
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
         
         detection_result = detector.detect(mp_image)
-        
         current_gesture = "UNKNOWN"
-        
+        stabilized_gesture = "UNKNOWN"
+        time_since_last = time.time() - last_action_time
+
         if detection_result.hand_landmarks:
             for hand_landmarks_list in detection_result.hand_landmarks:
                 draw_landmarks(img, hand_landmarks_list)
                 
                 fingers = count_fingers(hand_landmarks_list)
                 current_gesture = recognize_gesture(fingers)
+                
+                # Instantly move mouse if index is up (no stabilization delay needed for smooth movement)
+                if current_gesture == "INDEX_UP":
+                    index_tip = hand_landmarks_list[8]
+                    # Map to screen (add some padding/scaling if needed, direct mapping for now)
+                    target_x = index_tip.x * SCREEN_W
+                    target_y = index_tip.y * SCREEN_H
+                    
+                    cloc_x = ploc_x + (target_x - ploc_x) / SMOOTHING
+                    cloc_y = ploc_y + (target_y - ploc_y) / SMOOTHING
+                    
+                    pyautogui.moveTo(cloc_x, cloc_y, _pause=False)
+                    ploc_x, ploc_y = cloc_x, cloc_y
+
                 gesture_history.append(current_gesture)
         else:
             gesture_history.clear()
 
-        # Check for stabilized gesture
-        stabilized_gesture = "UNKNOWN"
+        # Execute Action 
         if len(gesture_history) == STABILIZATION_FRAMES and len(set(gesture_history)) == 1:
             stabilized_gesture = gesture_history[0]
-            
-        # Execute Action 
-        time_since_last = time.time() - last_action_time
-        if stabilized_gesture != "UNKNOWN":
-            execute_action(stabilized_gesture)
+            if stabilized_gesture not in ["UNKNOWN", "INDEX_UP"]:
+                execute_action(stabilized_gesture)
 
         # -- UX Rendering --
-        
-        # 1. Top Left Status
         status_text = "READY" if time_since_last >= COOLDOWN else f"COOLDOWN ({COOLDOWN - time_since_last:.1f}s)"
         status_color = (0, 255, 0) if time_since_last >= COOLDOWN else (0, 0, 255)
         draw_overlay_text(img, f"Status: {status_text}", (15, 35), color=status_color)
-        draw_overlay_text(img, f"Gesture: {stabilized_gesture}", (15, 75))
+        draw_overlay_text(img, f"Gesture: {current_gesture}", (15, 75))
         draw_overlay_text(img, f"FPS: {int(fps)}", (15, 115), font_scale=0.5, thickness=1)
 
-        # 2. Action Toast Banner (Center)
         if time_since_last < 1.0:
-            # Fade out effect logic
             alpha = max(0.0, 1.0 - time_since_last)
             if alpha > 0:
                 text = f"ACTION: {last_action_name}"
@@ -197,15 +205,13 @@ def main():
                 t_size, _ = cv2.getTextSize(text, font, scale, thick)
                 tx, ty = (w - t_size[0]) // 2, (h // 2)
                 
-                # Make a safe overlay
                 overlay = img.copy()
                 cv2.rectangle(overlay, (tx-20, ty-t_size[1]-20), (tx+t_size[0]+20, ty+20), (50,200,50), cv2.FILLED)
                 cv2.putText(overlay, text, (tx, ty), font, scale, (255,255,255), thick, cv2.LINE_AA)
                 cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
-        # 3. Bottom Instructions
-        instructions = "Palm=Max | Fist=Min | Peace=Close | L-Sign=Folder | 'q'=Quit"
-        draw_overlay_text(img, instructions, (15, h - 20), font_scale=0.5, thickness=1)
+        inst = "Palm=Max|Fist=Min|Peace=Close|L=Folder|Index=Move|Thumb=Click"
+        draw_overlay_text(img, inst, (15, h - 20), font_scale=0.5, thickness=1)
 
         cv2.imshow("Hand Gesture Control - Pro UX", img)
         
