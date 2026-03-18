@@ -7,13 +7,6 @@ import time
 import math
 from collections import deque
 import winsound
-import threading
-import sounddevice as sd
-import numpy as np
-import wave
-import io
-import speech_recognition as sr
-import os
 
 # Configuration
 COOLDOWN = 1.5  
@@ -31,91 +24,6 @@ pyautogui.FAILSAFE = False
 SCREEN_W, SCREEN_H = pyautogui.size()
 ploc_x, ploc_y = 0, 0
 
-# -----------------
-# VOICE ASSISTANT 
-# -----------------
-def execute_voice_command(text):
-    global last_action_time, last_action_name
-    if "open" in text:
-        app_name = text.split("open")[-1].strip()
-        if not app_name: return
-        
-        # Native Windows command shortcuts
-        app_map = {
-            "notepad": "notepad.exe",
-            "calculator": "calc.exe",
-            "calc": "calc.exe",
-            "explorer": "explorer.exe",
-            "browser": "start chrome",
-            "chrome": "start chrome",
-            "command prompt": "start cmd",
-            "terminal": "start cmd",
-            "paint": "mspaint.exe"
-        }
-        
-        launched = False
-        for key, cmd in app_map.items():
-            if key in app_name:
-                print(f"[Voice Assistant] Launching {key}...")
-                os.system(cmd)
-                launched = True
-                
-                # Update UI toast
-                last_action_name = f"VOICE: OPEN {key.upper()}"
-                last_action_time = time.time()
-                winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
-                break
-                
-        if not launched:
-            print(f"[Voice Assistant] Attempting to open {app_name} directly via start...")
-            os.system(f"start {app_name}") # Windows dynamically searches PATH and start menu registers
-            last_action_name = f"VOICE: OPEN {app_name.upper()}"
-            last_action_time = time.time()
-            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
-
-def voice_assistant_worker():
-    recognizer = sr.Recognizer()
-    samplerate = 16000
-    chunk_duration = 3  # Listen in 3 second discrete chunks
-    
-    print("Voice Assistant Initialized. Listening for 'open <app>'...")
-    
-    while True:
-        try:
-            audio_chunk = sd.rec(int(chunk_duration * samplerate), samplerate=samplerate, channels=1, dtype='int16')
-            sd.wait()
-            
-            # Check for silence using Root Mean Square (RMS)
-            rms = np.sqrt(np.mean(np.square(audio_chunk.astype(np.float32))))
-            if rms < 300: # Tune this threshold depending on mic sensitivity
-                continue
-                
-            byte_io = io.BytesIO()
-            with wave.open(byte_io, 'wb') as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2) # 16-bit PCM
-                wav_file.setframerate(samplerate)
-                wav_file.writeframes(audio_chunk.tobytes())
-                
-            byte_io.seek(0)
-            
-            with sr.AudioFile(byte_io) as source:
-                audio_data = recognizer.record(source)
-                try:
-                    text = recognizer.recognize_google(audio_data).lower()
-                    print(f"[Voice Assistant] Heard: '{text}'")
-                    execute_voice_command(text)
-                except sr.UnknownValueError:
-                    pass # Couldn't parse intent
-                except sr.RequestError as e:
-                    print(f"[Voice Assistant] Web API Error: {e}")
-        except Exception as e:
-            print(f"[Voice Assistant] Thread Error: {e}")
-            time.sleep(1)
-
-# -----------------
-# GESTURE SYSTEM
-# -----------------
 def get_distance(p1, p2):
     return math.hypot(p1.x - p2.x, p1.y - p2.y)
 
@@ -213,10 +121,6 @@ def draw_overlay_text(img, text, pos, font_scale=0.7, color=(255, 255, 255), thi
 
 def main():
     global gesture_history, last_action_time, ploc_x, ploc_y
-    
-    # Start the Voice Assistant background thread
-    voice_thread = threading.Thread(target=voice_assistant_worker, daemon=True)
-    voice_thread.start()
     
     base_options = python.BaseOptions(model_asset_path='hand_landmarker.task')
     options = vision.HandLandmarkerOptions(base_options=base_options, num_hands=1)
