@@ -53,8 +53,6 @@ def recognize_gesture(fingers):
         return "FIST"
     elif fingers == [False, True, True, False, False]:
         return "PEACE"
-    elif fingers == [True, True, False, False, False]:
-        return "L_SIGN"
     elif fingers == [False, True, False, False, False]:
         return "INDEX_UP"
     elif fingers == [True, False, False, False, False]:
@@ -81,10 +79,6 @@ def execute_action(gesture):
     elif gesture == "PEACE":
         last_action_name = "CLOSED App"
         pyautogui.hotkey('alt', 'f4')
-        action_triggered = True
-    elif gesture == "L_SIGN":
-        last_action_name = "OPENED EXPLORER"
-        pyautogui.hotkey('win', 'e')
         action_triggered = True
     elif gesture == "THUMB_UP":
         last_action_name = "DOUBLE CLICKED"
@@ -234,7 +228,7 @@ def main():
                 cv2.putText(overlay, text, (tx, ty), font, scale, (255,255,255), thick, cv2.LINE_AA)
                 cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
-        inst = "Palm=Max|Fist=Min|Peace=Close|L=Folder|Index=Move|Thumb=Click"
+        inst = "Palm=Max|Fist=Min|Peace=Close|Index=Move|Thumb=Click"
         draw_overlay_text(img, inst, (15, h - 20), font_scale=0.5, thickness=1)
 
         cv2.imshow("Hand Gesture Control - Pro UX", img)
