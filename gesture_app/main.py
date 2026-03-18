@@ -11,7 +11,8 @@ import winsound
 # Configuration
 COOLDOWN = 1.5  
 STABILIZATION_FRAMES = 8 
-SMOOTHING = 5  # For mouse movement
+SMOOTHING = 5  
+FRAME_REDUCTION = 100 # Margin for the virtual trackpad
 
 # State tracking
 last_action_time = 0
@@ -19,7 +20,7 @@ last_action_name = ""
 gesture_history = deque(maxlen=STABILIZATION_FRAMES)
 
 # Mouse tracking
-pyautogui.FAILSAFE = False # Prevent crash if we move to corners
+pyautogui.FAILSAFE = False
 SCREEN_W, SCREEN_H = pyautogui.size()
 ploc_x, ploc_y = 0, 0
 
@@ -51,7 +52,7 @@ def recognize_gesture(fingers):
     elif up_count == 0:
         return "FIST"
     elif fingers == [False, True, True, False, False]:
-        return "POINTER"
+        return "PEACE"
     elif fingers == [True, True, False, False, False]:
         return "L_SIGN"
     elif fingers == [False, True, False, False, False]:
@@ -76,6 +77,10 @@ def execute_action(gesture):
     elif gesture == "FIST":
         last_action_name = "MINIMIZED"
         pyautogui.hotkey('win', 'down')
+        action_triggered = True
+    elif gesture == "PEACE":
+        last_action_name = "CLOSED App"
+        pyautogui.hotkey('alt', 'f4')
         action_triggered = True
     elif gesture == "L_SIGN":
         last_action_name = "OPENED EXPLORER"
@@ -142,6 +147,10 @@ def main():
         img = cv2.flip(img, 1)
         h, w, _ = img.shape
         
+        # Draw virtual trackpad
+        cv2.rectangle(img, (FRAME_REDUCTION, FRAME_REDUCTION), 
+                     (w - FRAME_REDUCTION, h - FRAME_REDUCTION), (255, 0, 255), 2)
+        
         curr_time = time.time()
         fps = 1 / (curr_time - prev_time)
         prev_time = curr_time
@@ -161,18 +170,37 @@ def main():
                 fingers = count_fingers(hand_landmarks_list)
                 current_gesture = recognize_gesture(fingers)
                 
-                # Instantly move mouse if pointer gesture is active
-                if current_gesture == "POINTER":
+                if current_gesture == "INDEX_UP":
                     index_tip = hand_landmarks_list[8]
-                    # Map to screen (add some padding/scaling if needed, direct mapping for now)
-                    target_x = index_tip.x * SCREEN_W
-                    target_y = index_tip.y * SCREEN_H
                     
-                    cloc_x = ploc_x + (target_x - ploc_x) / SMOOTHING
-                    cloc_y = ploc_y + (target_y - ploc_y) / SMOOTHING
+                    # Convert to pixel coordinates
+                    idx_px = index_tip.x * w
+                    idx_py = index_tip.y * h
                     
-                    pyautogui.moveTo(cloc_x, cloc_y, _pause=False)
-                    ploc_x, ploc_y = cloc_x, cloc_y
+                    # Constrain within the Active Trackpad boundary
+                    box_w = w - 2 * FRAME_REDUCTION
+                    box_h = h - 2 * FRAME_REDUCTION
+                    mx = max(FRAME_REDUCTION, min(idx_px, w - FRAME_REDUCTION))
+                    my = max(FRAME_REDUCTION, min(idx_py, h - FRAME_REDUCTION))
+                    
+                    # Map to full screen coordinates
+                    target_x = ((mx - FRAME_REDUCTION) / box_w) * SCREEN_W
+                    target_y = ((my - FRAME_REDUCTION) / box_h) * SCREEN_H
+                    
+                    # Deadzone + Smoothing Optimization
+                    dx = target_x - ploc_x
+                    dy = target_y - ploc_y
+                    dist = math.hypot(dx, dy)
+                    
+                    if dist > 3: # Micro-jitter deadzone
+                        cloc_x = ploc_x + dx / SMOOTHING
+                        cloc_y = ploc_y + dy / SMOOTHING
+                        
+                        try:
+                            pyautogui.moveTo(cloc_x, cloc_y, _pause=False)
+                            ploc_x, ploc_y = cloc_x, cloc_y
+                        except pyautogui.FailSafeException:
+                            pass
 
                 gesture_history.append(current_gesture)
         else:
@@ -181,7 +209,7 @@ def main():
         # Execute Action 
         if len(gesture_history) == STABILIZATION_FRAMES and len(set(gesture_history)) == 1:
             stabilized_gesture = gesture_history[0]
-            if stabilized_gesture not in ["UNKNOWN", "POINTER", "INDEX_UP"]:
+            if stabilized_gesture not in ["UNKNOWN", "INDEX_UP"]:
                 execute_action(stabilized_gesture)
 
         # -- UX Rendering --
@@ -206,7 +234,7 @@ def main():
                 cv2.putText(overlay, text, (tx, ty), font, scale, (255,255,255), thick, cv2.LINE_AA)
                 cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
-        inst = "Palm=Max|Fist=Min|L=Folder|2Fingers=Move|Thumb=Click"
+        inst = "Palm=Max|Fist=Min|Peace=Close|L=Folder|Index=Move|Thumb=Click"
         draw_overlay_text(img, inst, (15, h - 20), font_scale=0.5, thickness=1)
 
         cv2.imshow("Hand Gesture Control - Pro UX", img)
