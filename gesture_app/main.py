@@ -1,18 +1,10 @@
 import cv2
 import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 import pyautogui
 import time
 import math
-
-# Initialize MediaPipe Hands
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(
-    static_image_mode=False,
-    max_num_hands=1,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.5
-)
-mp_draw = mp.solutions.drawing_utils
 
 # Cooldown to prevent spamming actions
 last_action_time = 0
@@ -25,26 +17,14 @@ def count_fingers(hand_landmarks):
     """
     Returns a list of 5 booleans representing which fingers are up.
     Order: Thumb, Index, Middle, Ring, Pinky
+    hand_landmarks is a list of NormalizedLandmark objects with x, y, z properties.
     """
     fingers = []
     
-    # Thumb: compare tip x to ip x (works for right hand mostly, simplified for both here)
-    # A more robust way is to check if thumb tip is further from the wrist than the thumb MCP
-    # Hand orientation matters, but for simplicity we rely on y and x heuristics.
-    
-    # For thumb, checking distance to index MCP vs thumb MCP can work
-    if hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP].x < hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_IP].x:
-        fingers.append(True) # Left hand mostly or flipped right
-    elif hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP].x > hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_IP].x:
-        fingers.append(True)
-    # Actually just a simple y/x heuristic is hard for thumb. Let's use x relative to pinky.
-    # We will just evaluate the other 4 robustly based on y.
-    
-    # Let's write a better thumb state:
-    # If the x-distance between thumb tip and pinky base is greater than thumb ip and pinky base
-    thumb_tip = hand_landmarks.landmark[4]
-    thumb_ip = hand_landmarks.landmark[3]
-    pinky_mcp = hand_landmarks.landmark[17]
+    # Thumb: Calculate distance from tip (4) to pinky mcp (17) vs ip (3) to pinky mcp
+    thumb_tip = hand_landmarks[4]
+    thumb_ip = hand_landmarks[3]
+    pinky_mcp = hand_landmarks[17]
     dist_tip = get_distance(thumb_tip, pinky_mcp)
     dist_ip = get_distance(thumb_ip, pinky_mcp)
     fingers.append(dist_tip > dist_ip)
@@ -53,7 +33,7 @@ def count_fingers(hand_landmarks):
     tip_ids = [8, 12, 16, 20]
     for id in tip_ids:
         # If tip is higher (y is smaller) than the PIP joint, finger is up
-        if hand_landmarks.landmark[id].y < hand_landmarks.landmark[id - 2].y:
+        if hand_landmarks[id].y < hand_landmarks[id - 2].y:
             fingers.append(True)
         else:
             fingers.append(False)
@@ -103,7 +83,37 @@ def execute_action(gesture):
         pyautogui.hotkey('win', 'e')
         last_action_time = time.time()
 
+def draw_landmarks(img, hand_landmarks):
+    h, w, _ = img.shape
+    # Draw points
+    for idx, lm in enumerate(hand_landmarks):
+        cx, cy = int(lm.x * w), int(lm.y * h)
+        cv2.circle(img, (cx, cy), 5, (255, 0, 0), cv2.FILLED)
+        
+    # Connections (simplified list of pairs)
+    connections = [
+        (0, 1), (1, 2), (2, 3), (3, 4), # Thumb
+        (0, 5), (5, 6), (6, 7), (7, 8), # Index
+        (5, 9), (9, 10), (10, 11), (11, 12), # Middle
+        (9, 13), (13, 14), (14, 15), (15, 16), # Ring
+        (13, 17), (0, 17), (17, 18), (18, 19), (19, 20) # Pinky
+    ]
+    for connection in connections:
+        point1 = hand_landmarks[connection[0]]
+        point2 = hand_landmarks[connection[1]]
+        cx1, cy1 = int(point1.x * w), int(point1.y * h)
+        cx2, cy2 = int(point2.x * w), int(point2.y * h)
+        cv2.line(img, (cx1, cy1), (cx2, cy2), (0, 255, 0), 2)
+
 def main():
+    # Setup MediaPipe Hand Landmarker Task
+    base_options = python.BaseOptions(model_asset_path='hand_landmarker.task')
+    options = vision.HandLandmarkerOptions(
+        base_options=base_options,
+        num_hands=1
+    )
+    detector = vision.HandLandmarker.create_from_options(options)
+
     cap = cv2.VideoCapture(0)
     
     if not cap.isOpened():
@@ -128,15 +138,17 @@ def main():
         
         # Convert BGR to RGB for MediaPipe
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results = hands.process(img_rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+        
+        detection_result = detector.detect(mp_image)
         
         gesture_name = "UNKNOWN"
         
-        if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                mp_draw.draw_landmarks(img, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+        if detection_result.hand_landmarks:
+            for hand_landmarks_list in detection_result.hand_landmarks:
+                draw_landmarks(img, hand_landmarks_list)
                 
-                fingers = count_fingers(hand_landmarks)
+                fingers = count_fingers(hand_landmarks_list)
                 gesture_name = recognize_gesture(fingers)
                 
                 if gesture_name != "UNKNOWN":
