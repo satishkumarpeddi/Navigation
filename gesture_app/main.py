@@ -37,7 +37,9 @@ def _do_drag_end():
     pyautogui.mouseUp(button='left')
 
 RIGHT_HAND_ACTIONS = {
-    "THUMB_UP": ("CLICKED", _do_click),
+    "THUMB_UP":   ("CLICKED",    _do_click),
+    "OPEN_PALM":  ("MAXIMIZED",  lambda: pyautogui.hotkey('win', 'up')),
+    "FIST":       ("MINIMIZED",  lambda: pyautogui.hotkey('win', 'down')),
 }
 
 # ── State Tracking ──────────────────────────────────────────
@@ -258,7 +260,7 @@ def main():
                 if (len(gesture_history) == STABILIZATION_FRAMES
                         and len(set(gesture_history)) == 1):
                     stabilized = gesture_history[0]
-                    if stabilized not in ("UNKNOWN", "OPEN_PALM", "FIST", "FOUR_FINGERS"):
+                    if stabilized not in ("UNKNOWN", "FOUR_FINGERS", "PEACE"):
                         execute_right_action(stabilized)
         else:
             if is_dragging:
