@@ -93,10 +93,11 @@ def execute_action(gesture):
         
     return action_triggered
 
-def draw_landmarks(img, hand_landmarks, is_active=True):
+def draw_landmarks(img, hand_landmarks, is_left=True):
     h, w, _ = img.shape
-    node_color = (200, 200, 200) if is_active else (80, 80, 80)
-    line_color = (255, 180, 50) if is_active else (80, 80, 80)
+    node_color = (255, 255, 255)
+    # Blue for Left (Cursor), Green for Right (Actions)
+    line_color = (255, 180, 50) if is_left else (50, 255, 50)
     
     for idx, lm in enumerate(hand_landmarks):
         cx, cy = int(lm.x * w), int(lm.y * h)
@@ -145,10 +146,6 @@ def main():
         img = cv2.flip(img, 1)
         h, w, _ = img.shape
         
-        # Draw virtual trackpad
-        cv2.rectangle(img, (FRAME_REDUCTION, FRAME_REDUCTION), 
-                     (w - FRAME_REDUCTION, h - FRAME_REDUCTION), (255, 0, 255), 2)
-        
         curr_time = time.time()
         fps = 1 / (curr_time - prev_time)
         prev_time = curr_time
@@ -163,18 +160,19 @@ def main():
 
         if detection_result.hand_landmarks:
             left_hand_found = False
+            right_hand_found = False
             for idx, hand_landmarks_list in enumerate(detection_result.hand_landmarks):
                 # Due to horizontal flipping (cv2.flip), Mediapipe detects the physical Left hand as "Right"
                 hand_label = detection_result.handedness[idx][0].category_name
                 is_physical_left = (hand_label == "Right")
                 
+                draw_landmarks(img, hand_landmarks_list, is_left=is_physical_left)
+                
+                fingers = count_fingers(hand_landmarks_list)
+                current_gesture = recognize_gesture(fingers)
+                
                 if is_physical_left:
                     left_hand_found = True
-                    draw_landmarks(img, hand_landmarks_list, is_active=True)
-                    
-                    fingers = count_fingers(hand_landmarks_list)
-                    current_gesture = recognize_gesture(fingers)
-                    
                     if current_gesture == "INDEX_UP":
                         index_tip = hand_landmarks_list[8]
                         
@@ -221,16 +219,14 @@ def main():
                                 pass
                     else:
                         target_history.clear()
-
+                else:
+                    right_hand_found = True
                     gesture_history.append(current_gesture)
                     
-                else:
-                    # Render the right hand as inactive (faded colors)
-                    draw_landmarks(img, hand_landmarks_list, is_active=False)
-                    
             if not left_hand_found:
-                gesture_history.clear()
                 target_history.clear()
+            if not right_hand_found:
+                gesture_history.clear()
         else:
             gesture_history.clear()
             target_history.clear()
