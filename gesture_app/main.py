@@ -8,153 +8,154 @@ import math
 from collections import deque
 import winsound
 
-# ── Configuration ──────────────────────────────────────────
-COOLDOWN            = 1.5   # seconds between right-hand actions
-STABILIZATION_FRAMES = 8    # frames gesture must be stable before triggering
-SMOOTHING           = 5     # base cursor smoothing factor
-FRAME_REDUCTION     = 100   # virtual trackpad margin (pixels)
+# ══════════════════════════════════════════════════════
+#  CONFIGURATION
+# ══════════════════════════════════════════════════════
+SMOOTHING           = 5      # cursor smoothing factor
+FRAME_REDUCTION     = 100    # virtual trackpad margin (px)
+PINCH_THRESHOLD     = 0.07   # normalised thumb-index distance for pinch
+MID_PINCH_THRESHOLD = 0.07   # normalised thumb-middle distance for right-click pinch
+DOUBLE_CLICK_GAP    = 0.35   # max seconds between two pinches = double-click
+SCROLL_SENSITIVITY  = 30     # pixels of hand movement per scroll tick
+FIST_STABILIZE      = 6      # frames fist must be held to enter pause mode
 
-# ── Gesture Definitions ─────────────────────────────────────
-# fingers list order: [Thumb, Index, Middle, Ring, Pinky]
+# ══════════════════════════════════════════════════════
+#  GESTURE DEFINITIONS   [Thumb, Index, Middle, Ring, Pinky]
+# ══════════════════════════════════════════════════════
 GESTURES = {
-    "OPEN_PALM":    [True,  True,  True,  True,  True ],
-    "FIST":         [False, False, False, False, False],
-    "PEACE":        [False, True,  True,  False, False],   # Index + Middle → cursor move
-    "INDEX_UP":     [False, True,  False, False, False],
-    "THUMB_UP":     [True,  False, False, False, False],   # Right: click/select app
-    "FOUR_FINGERS": [False, True,  True,  True,  True ],   # Right: drag/reposition window
+    "OPEN_PALM":  [True,  True,  True,  True,  True ],
+    "FIST":       [False, False, False, False, False],
+    "PEACE":      [False, True,  True,  False, False],  # scroll / cursor (prev scheme)
+    "INDEX_UP":   [False, True,  False, False, False],
+    "THUMB_UP":   [True,  False, False, False, False],
 }
 
-# ── Right-Hand Action Mapping ───────────────────────────────
-# Maps gesture name → (display_name, action_fn)
-def _do_click():
-    pyautogui.click(_pause=False)
-
-def _do_drag_start():
-    pyautogui.mouseDown(button='left')
-
-def _do_drag_end():
-    pyautogui.mouseUp(button='left')
-
-RIGHT_HAND_ACTIONS = {
-    "THUMB_UP":   ("CLICKED",    _do_click),
-    "OPEN_PALM":  ("MAXIMIZED",  lambda: pyautogui.hotkey('win', 'up')),
-    "FIST":       ("MINIMIZED",  lambda: pyautogui.hotkey('win', 'down')),
-}
-
-# ── State Tracking ──────────────────────────────────────────
-last_action_time  = 0
-last_action_name  = ""
-gesture_history   = deque(maxlen=STABILIZATION_FRAMES)
-
-# ── Mouse / Drag State ──────────────────────────────────────
+# ══════════════════════════════════════════════════════
+#  GLOBAL STATE
+# ══════════════════════════════════════════════════════
 pyautogui.FAILSAFE = False
 SCREEN_W, SCREEN_H = pyautogui.size()
-ploc_x, ploc_y     = 0, 0
-target_history      = deque(maxlen=4)
-is_dragging         = False   # right-hand window drag
-cursor_locked       = False   # both-palm lock mode
 
-# ── Helpers ─────────────────────────────────────────────────
+# Cursor
+ploc_x, ploc_y  = 0, 0
+target_history  = deque(maxlen=4)
+
+# Drag
+is_dragging     = False
+
+# Pause (fist)
+paused          = False
+fist_frame_count = 0
+
+# Click timing (for double-click detection)
+last_pinch_time      = 0.0
+pinch_active         = False   # True while thumb+index are currently together
+click_cooldown       = 0.3     # seconds to ignore new left-pinch after a click
+
+# Scroll
+scroll_ref_y    = None         # y position when PEACE entered
+
+# Last action display
+last_action_name = ""
+last_action_time = 0.0
+
+# ══════════════════════════════════════════════════════
+#  HELPERS
+# ══════════════════════════════════════════════════════
 def get_distance(p1, p2):
     return math.hypot(p1.x - p2.x, p1.y - p2.y)
 
-def count_fingers(hand_landmarks):
-    """Returns [Thumb, Index, Middle, Ring, Pinky] booleans."""
+def count_fingers(lm):
+    """[Thumb, Index, Middle, Ring, Pinky]"""
     fingers = []
-    thumb_tip   = hand_landmarks[4]
-    thumb_ip    = hand_landmarks[3]
-    pinky_mcp   = hand_landmarks[17]
-    fingers.append(get_distance(thumb_tip, pinky_mcp) > get_distance(thumb_ip, pinky_mcp))
-    for tip_id in [8, 12, 16, 20]:
-        fingers.append(hand_landmarks[tip_id].y < hand_landmarks[tip_id - 2].y)
+    fingers.append(
+        get_distance(lm[4], lm[17]) > get_distance(lm[3], lm[17])
+    )
+    for tip in [8, 12, 16, 20]:
+        fingers.append(lm[tip].y < lm[tip - 2].y)
     return fingers
 
 def recognize_gesture(fingers):
-    """Match finger state to a gesture name via GESTURES dict."""
     for name, pattern in GESTURES.items():
         if fingers == pattern:
             return name
     return "UNKNOWN"
 
-def move_cursor(track_point, w, h):
-    """Smooth cursor movement towards track_point with dynamic smoothing."""
+class _Pt:
+    """Lightweight point wrapper."""
+    def __init__(self, x, y): self.x = x; self.y = y
+
+def is_thumb_index_pinch(lm):
+    return get_distance(lm[4], lm[8]) < PINCH_THRESHOLD
+
+def is_thumb_middle_pinch(lm):
+    return get_distance(lm[4], lm[12]) < MID_PINCH_THRESHOLD
+
+def move_cursor(pt, w, h):
+    """Smoothly move cursor to normalised hand point (pt.x, pt.y)."""
     global ploc_x, ploc_y
-    idx_px = track_point.x * w
-    idx_py = track_point.y * h
-    box_w = w - 2 * FRAME_REDUCTION
-    box_h = h - 2 * FRAME_REDUCTION
-    mx = max(FRAME_REDUCTION, min(idx_px, w - FRAME_REDUCTION))
-    my = max(FRAME_REDUCTION, min(idx_py, h - FRAME_REDUCTION))
-    target_x = ((mx - FRAME_REDUCTION) / box_w) * SCREEN_W
-    target_y = ((my - FRAME_REDUCTION) / box_h) * SCREEN_H
-    target_history.append((target_x, target_y))
-    avg_x = sum(t[0] for t in target_history) / len(target_history)
-    avg_y = sum(t[1] for t in target_history) / len(target_history)
-    dx, dy = avg_x - ploc_x, avg_y - ploc_y
+    px = pt.x * w
+    py = pt.y * h
+    bw = w - 2 * FRAME_REDUCTION
+    bh = h - 2 * FRAME_REDUCTION
+    mx = max(FRAME_REDUCTION, min(px, w - FRAME_REDUCTION))
+    my = max(FRAME_REDUCTION, min(py, h - FRAME_REDUCTION))
+    tx = ((mx - FRAME_REDUCTION) / bw) * SCREEN_W
+    ty = ((my - FRAME_REDUCTION) / bh) * SCREEN_H
+    target_history.append((tx, ty))
+    ax = sum(t[0] for t in target_history) / len(target_history)
+    ay = sum(t[1] for t in target_history) / len(target_history)
+    dx, dy = ax - ploc_x, ay - ploc_y
     dist = math.hypot(dx, dy)
     if dist > 1.5:
-        dyn = SMOOTHING
-        if dist < 30:
-            dyn = SMOOTHING * 1.5
-        elif dist > 150:
-            dyn = SMOOTHING * 0.4
-        cloc_x = ploc_x + dx / dyn
-        cloc_y = ploc_y + dy / dyn
+        s = SMOOTHING * (1.5 if dist < 30 else (0.4 if dist > 150 else 1.0))
+        cloc_x = ploc_x + dx / s
+        cloc_y = ploc_y + dy / s
         try:
             pyautogui.moveTo(int(cloc_x), int(cloc_y), _pause=False)
             ploc_x, ploc_y = cloc_x, cloc_y
         except pyautogui.FailSafeException:
             pass
 
-def execute_right_action(gesture):
-    """Fire a stabilized right-hand action with cooldown."""
-    global last_action_time, last_action_name
-    if time.time() - last_action_time < COOLDOWN:
-        return
-    if gesture in RIGHT_HAND_ACTIONS:
-        name, fn = RIGHT_HAND_ACTIONS[gesture]
-        fn()
-        last_action_name = name
-        last_action_time = time.time()
-        winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
-        print(f"Action: {name}")
+def flash_action(name):
+    global last_action_name, last_action_time
+    last_action_name = name
+    last_action_time = time.time()
+    winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
+    print(f"[Action] {name}")
 
-def draw_landmarks(img, hand_landmarks, is_left=True):
+def draw_landmarks(img, lm, color=(255, 180, 50)):
     h, w, _ = img.shape
-    node_color = (255, 255, 255)
-    line_color = (255, 180, 50) if is_left else (50, 255, 50)
-    for lm in hand_landmarks:
-        cx, cy = int(lm.x * w), int(lm.y * h)
-        cv2.circle(img, (cx, cy), 5, node_color, cv2.FILLED)
-    connections = [
-        (0,1),(1,2),(2,3),(3,4),
-        (0,5),(5,6),(6,7),(7,8),
-        (5,9),(9,10),(10,11),(11,12),
-        (9,13),(13,14),(14,15),(15,16),
-        (13,17),(0,17),(17,18),(18,19),(19,20)
-    ]
-    for a, b in connections:
-        p1, p2 = hand_landmarks[a], hand_landmarks[b]
+    for p in lm:
+        cv2.circle(img, (int(p.x*w), int(p.y*h)), 5, (255,255,255), cv2.FILLED)
+    for a, b in [(0,1),(1,2),(2,3),(3,4),(0,5),(5,6),(6,7),(7,8),
+                 (5,9),(9,10),(10,11),(11,12),(9,13),(13,14),(14,15),(15,16),
+                 (13,17),(0,17),(17,18),(18,19),(19,20)]:
         cv2.line(img,
-                 (int(p1.x*w), int(p1.y*h)),
-                 (int(p2.x*w), int(p2.y*h)),
-                 line_color, 2)
+                 (int(lm[a].x*w), int(lm[a].y*h)),
+                 (int(lm[b].x*w), int(lm[b].y*h)),
+                 color, 2)
 
-def draw_overlay_text(img, text, pos, font_scale=0.7, color=(255,255,255), thickness=2, bg_color=(0,0,0)):
+def draw_overlay_text(img, text, pos, font_scale=0.65,
+                      color=(255,255,255), thickness=2, bg=(0,0,0)):
     font = cv2.FONT_HERSHEY_SIMPLEX
-    text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
-    x, y = pos
-    cv2.rectangle(img, (x-5, y-text_size[1]-10), (x+text_size[0]+5, y+5), bg_color, cv2.FILLED)
+    sz, _ = cv2.getTextSize(text, font, font_scale, thickness)
+    x, y  = pos
+    cv2.rectangle(img, (x-4, y-sz[1]-8), (x+sz[0]+4, y+4), bg, cv2.FILLED)
     cv2.putText(img, text, pos, font, font_scale, color, thickness, cv2.LINE_AA)
 
-# ── Main Loop ───────────────────────────────────────────────
+# ══════════════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════════════
 def main():
-    global gesture_history, last_action_time, ploc_x, ploc_y
-    global target_history, is_dragging, cursor_locked
+    global ploc_x, ploc_y, target_history
+    global is_dragging, paused, fist_frame_count
+    global pinch_active, last_pinch_time
+    global scroll_ref_y
+    global last_action_name, last_action_time
 
     base_options = python.BaseOptions(model_asset_path='hand_landmarker.task')
-    options      = vision.HandLandmarkerOptions(base_options=base_options, num_hands=2)
+    options      = vision.HandLandmarkerOptions(base_options=base_options, num_hands=1)
     detector     = vision.HandLandmarker.create_from_options(options)
 
     cap = cv2.VideoCapture(0)
@@ -165,141 +166,138 @@ def main():
     prev_time = 0
 
     while True:
-        success, img = cap.read()
-        if not success:
+        ok, img = cap.read()
+        if not ok:
             continue
 
         img = cv2.flip(img, 1)
         h, w, _ = img.shape
 
-        curr_time = time.time()
-        fps = 1 / (curr_time - prev_time) if prev_time else 0
-        prev_time = curr_time
+        now      = time.time()
+        fps      = 1 / (now - prev_time) if prev_time else 0
+        prev_time = now
 
-        img_rgb   = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        mp_image  = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-        result    = detector.detect(mp_image)
+        img_rgb  = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        mp_img   = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+        result   = detector.detect(mp_img)
 
-        time_since_last = time.time() - last_action_time
+        lm       = None
+        gesture  = "NONE"
 
-        left_gesture  = "UNKNOWN"
-        right_gesture = "UNKNOWN"
-        left_landmarks  = None
-        right_landmarks = None
-
-        # ── Classify each hand ──────────────────────────────
         if result.hand_landmarks:
-            for idx, lm_list in enumerate(result.hand_landmarks):
-                label = result.handedness[idx][0].category_name
-                # Mirrored feed: MediaPipe "Right" = physical Left
-                is_physical_left = (label == "Right")
-                draw_landmarks(img, lm_list, is_left=is_physical_left)
-                fingers = count_fingers(lm_list)
-                gesture = recognize_gesture(fingers)
-                if is_physical_left:
-                    left_gesture   = gesture
-                    left_landmarks = lm_list
-                else:
-                    right_gesture   = gesture
-                    right_landmarks = lm_list
+            lm      = result.hand_landmarks[0]
+            fingers = count_fingers(lm)
+            gesture = recognize_gesture(fingers)
+            lm_color = (80, 80, 255) if paused else (255, 180, 50)
+            draw_landmarks(img, lm, color=lm_color)
 
-        # ── Dual-hand signals (checked before individual hand logic) ──
-        both_open_palm = (left_gesture == "OPEN_PALM" and right_gesture == "OPEN_PALM")
-        both_fist      = (left_gesture == "FIST"      and right_gesture == "FIST")
-
-        if both_open_palm and not cursor_locked:
-            # Enter cursor lock mode
-            cursor_locked = True
-            if is_dragging:
-                pyautogui.mouseUp(button='left')
-                is_dragging = False
-            gesture_history.clear()
-            last_action_name = "CURSOR LOCKED"
-            last_action_time = time.time()
-            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
-
-        elif both_fist and cursor_locked:
-            # Exit cursor lock mode
-            cursor_locked = False
-            last_action_name = "CURSOR UNLOCKED"
-            last_action_time = time.time()
-            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
-
-        # ── Left Hand: cursor movement (PEACE = Index + Middle) ──
-        if left_landmarks and left_gesture == "PEACE":
-            # Use midpoint of index tip (8) and middle tip (12) as tracking point
-            lm = left_landmarks
-            mid_x = (lm[8].x + lm[12].x) / 2
-            mid_y = (lm[8].y + lm[12].y) / 2
-
-            class _MP:
-                def __init__(self, x, y):
-                    self.x = x
-                    self.y = y
-
-            move_cursor(_MP(mid_x, mid_y), w, h)
-        else:
-            target_history.clear()
-
-        # ── Right Hand: actions (disabled in cursor lock mode) ────
-        if not cursor_locked and right_landmarks:
-            if right_gesture == "FOUR_FINGERS":
-                # Drag window — hold left mouse btn and follow hand palm (wrist = 0)
-                if not is_dragging:
-                    pyautogui.mouseDown(button='left')
-                    is_dragging = True
-                move_cursor(right_landmarks[9], w, h)   # use palm center (MCP 9)
-
-            else:
+        # ── PAUSE / RESUME via FIST ────────────────────────────────
+        if gesture == "FIST":
+            fist_frame_count += 1
+            if fist_frame_count >= FIST_STABILIZE and not paused:
+                paused = True
                 if is_dragging:
                     pyautogui.mouseUp(button='left')
                     is_dragging = False
-
-                # Stabilised action
-                gesture_history.append(right_gesture)
-                if (len(gesture_history) == STABILIZATION_FRAMES
-                        and len(set(gesture_history)) == 1):
-                    stabilized = gesture_history[0]
-                    if stabilized not in ("UNKNOWN", "FOUR_FINGERS", "PEACE"):
-                        execute_right_action(stabilized)
+                target_history.clear()
+                flash_action("PAUSED")
         else:
+            if paused and gesture == "OPEN_PALM":
+                paused = False
+                fist_frame_count = 0
+                flash_action("RESUMED")
+            elif not paused:
+                fist_frame_count = 0
+
+        if paused or lm is None:
+            # Only render HUD, skip all control logic
+            _render_hud(img, h, w, fps, gesture, now)
+            cv2.imshow("Hand Gesture Control", img)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            continue
+
+        # ══════════════════════════════════════════
+        #  GESTURE DISPATCH
+        # ══════════════════════════════════════════
+
+        ti_pinch  = is_thumb_index_pinch(lm)   # thumb + index
+        tm_pinch  = is_thumb_middle_pinch(lm)   # thumb + middle
+
+        # ── 1. CURSOR MOVEMENT — Open Palm ────────────────────────
+        if gesture == "OPEN_PALM":
+            scroll_ref_y = None   # exit scroll mode if we were in it
+            # Use mid-palm (landmark 9) as tracking point
+            move_cursor(lm[9], w, h)
+
+        # ── 2. SCROLL — PEACE (index + middle up) ─────────────────
+        elif gesture == "PEACE":
+            tip_y = (lm[8].y + lm[12].y) / 2   # avg of index+middle tip
+            if scroll_ref_y is None:
+                scroll_ref_y = tip_y
+            else:
+                delta = tip_y - scroll_ref_y
+                ticks = int(delta * SCREEN_H / SCROLL_SENSITIVITY)
+                if ticks != 0:
+                    pyautogui.scroll(-ticks, _pause=False)
+                    scroll_ref_y = tip_y   # reset ref after scroll
+            target_history.clear()
+
+        # ── 3. RIGHT CLICK — thumb + middle pinch ─────────────────
+        elif tm_pinch and not ti_pinch:
+            scroll_ref_y = None
+            target_history.clear()
+            if not pinch_active:
+                pyautogui.click(button='right', _pause=False)
+                pinch_active = True
+                flash_action("RIGHT CLICK")
+        
+        # ── 4. LEFT CLICK / DOUBLE-CLICK / DRAG — thumb+index pinch
+        elif ti_pinch:
+            scroll_ref_y = None
+            if not pinch_active:
+                # New pinch started
+                elapsed = now - last_pinch_time
+                if elapsed < DOUBLE_CLICK_GAP and not is_dragging:
+                    # Second pinch within window → double click
+                    pyautogui.doubleClick(_pause=False)
+                    flash_action("DOUBLE CLICK")
+                    last_pinch_time = 0   # reset so triple doesn't trigger
+                else:
+                    last_pinch_time = now
+                pinch_active = True
+
+            # While pinch is held → drag
+            if now - last_pinch_time > DOUBLE_CLICK_GAP:
+                if not is_dragging:
+                    pyautogui.mouseDown(button='left')
+                    is_dragging = True
+                # Track midpoint of thumb+index while dragging
+                mid_x = (lm[4].x + lm[8].x) / 2
+                mid_y = (lm[4].y + lm[8].y) / 2
+                move_cursor(_Pt(mid_x, mid_y), w, h)
+
+        # ── No pinch / no special gesture ─────────────────────────
+        else:
+            # Release left drag if pinch lifted
             if is_dragging:
                 pyautogui.mouseUp(button='left')
                 is_dragging = False
-            if not cursor_locked:
-                gesture_history.clear()
+                flash_action("DRAG RELEASED")
 
-        # ── HUD ────────────────────────────────────────────────────
-        if cursor_locked:
-            lock_label = "CURSOR LOCKED"
-            draw_overlay_text(img, lock_label, (15, 35), color=(0, 255, 255))
-        else:
-            status_text  = "READY" if time_since_last >= COOLDOWN else f"COOLDOWN ({COOLDOWN - time_since_last:.1f}s)"
-            status_color = (0, 255, 0) if time_since_last >= COOLDOWN else (0, 0, 255)
-            draw_overlay_text(img, f"Status: {status_text}", (15, 35), color=status_color)
+            # Fire single left click on pinch release
+            if pinch_active and not ti_pinch and not tm_pinch:
+                if not is_dragging and (now - last_pinch_time) < DOUBLE_CLICK_GAP:
+                    pyautogui.click(_pause=False)
+                    flash_action("LEFT CLICK")
 
-        draw_overlay_text(img, f"L: {left_gesture}",  (15, 75))
-        draw_overlay_text(img, f"R: {right_gesture}", (15, 110))
-        draw_overlay_text(img, f"FPS: {int(fps)}",    (15, 145), font_scale=0.5, thickness=1)
+            pinch_active = False
+            scroll_ref_y = None
 
-        # Action flash
-        if time_since_last < 2.0:
-            alpha = max(0.0, 1.0 - (time_since_last / 2.0))
-            if alpha > 0:
-                text  = f"ACTION: {last_action_name}"
-                font  = cv2.FONT_HERSHEY_DUPLEX
-                scale = 1.2
-                thick = 3
-                t_size, _ = cv2.getTextSize(text, font, scale, thick)
-                tx, ty = (w - t_size[0]) // 2, h // 2
-                overlay = img.copy()
-                cv2.rectangle(overlay, (tx-20, ty-t_size[1]-20), (tx+t_size[0]+20, ty+20), (50,200,50), cv2.FILLED)
-                cv2.putText(overlay, text, (tx, ty), font, scale, (255,255,255), thick, cv2.LINE_AA)
-                cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+            if gesture not in ("OPEN_PALM", "PEACE"):
+                target_history.clear()
 
-        inst = "L-Peace=Move | R-Thumb=Click | R-4Fingers=DragWindow | BothPalm=Lock | BothFist=Unlock"
-        draw_overlay_text(img, inst, (15, h - 20), font_scale=0.4, thickness=1)
-
+        _render_hud(img, h, w, fps, gesture, now)
         cv2.imshow("Hand Gesture Control", img)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
@@ -308,6 +306,39 @@ def main():
         pyautogui.mouseUp(button='left')
     cap.release()
     cv2.destroyAllWindows()
+
+
+def _render_hud(img, h, w, fps, gesture, now):
+    global last_action_name, last_action_time, paused
+
+    time_since = now - last_action_time
+
+    if paused:
+        draw_overlay_text(img, "⏸  PAUSED  (Open Palm to resume)", (15, 35),
+                          color=(80, 80, 255), font_scale=0.65)
+    else:
+        draw_overlay_text(img, f"Gesture: {gesture}", (15, 35))
+
+    draw_overlay_text(img, f"FPS: {int(fps)}", (15, 70), font_scale=0.5, thickness=1)
+
+    # Action flash in centre
+    if time_since < 2.0:
+        alpha = max(0.0, 1.0 - time_since / 2.0)
+        if alpha > 0:
+            text  = f"  {last_action_name}  "
+            font  = cv2.FONT_HERSHEY_DUPLEX
+            scale, thick = 1.1, 2
+            sz, _ = cv2.getTextSize(text, font, scale, thick)
+            tx, ty = (w - sz[0]) // 2, h // 2
+            ov = img.copy()
+            cv2.rectangle(ov, (tx-15, ty-sz[1]-15), (tx+sz[0]+15, ty+15), (30,180,30), cv2.FILLED)
+            cv2.putText(ov, text, (tx, ty), font, scale, (255,255,255), thick, cv2.LINE_AA)
+            cv2.addWeighted(ov, alpha, img, 1-alpha, 0, img)
+
+    # Bottom hint bar
+    hint = "Palm=Move | Peace=Scroll | Pinch(T+I)=Click/Drag | Pinch(T+M)=RightClick | Fist=Pause"
+    draw_overlay_text(img, hint, (15, h-18), font_scale=0.38, thickness=1)
+
 
 if __name__ == "__main__":
     main()
