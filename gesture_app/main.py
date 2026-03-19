@@ -23,6 +23,7 @@ gesture_history = deque(maxlen=STABILIZATION_FRAMES)
 pyautogui.FAILSAFE = False
 SCREEN_W, SCREEN_H = pyautogui.size()
 ploc_x, ploc_y = 0, 0
+target_history = deque(maxlen=4)
 
 def get_distance(p1, p2):
     return math.hypot(p1.x - p2.x, p1.y - p2.y)
@@ -120,7 +121,7 @@ def draw_overlay_text(img, text, pos, font_scale=0.7, color=(255, 255, 255), thi
     cv2.putText(img, text, pos, font, font_scale, color, thickness, cv2.LINE_AA)
 
 def main():
-    global gesture_history, last_action_time, ploc_x, ploc_y
+    global gesture_history, last_action_time, ploc_x, ploc_y, target_history
     
     base_options = python.BaseOptions(model_asset_path='hand_landmarker.task')
     options = vision.HandLandmarkerOptions(base_options=base_options, num_hands=1)
@@ -181,24 +182,40 @@ def main():
                     target_x = ((mx - FRAME_REDUCTION) / box_w) * SCREEN_W
                     target_y = ((my - FRAME_REDUCTION) / box_h) * SCREEN_H
                     
-                    # Deadzone + Smoothing Optimization
-                    dx = target_x - ploc_x
-                    dy = target_y - ploc_y
+                    # Smooth raw targets slightly with moving average
+                    target_history.append((target_x, target_y))
+                    avg_target_x = sum([t[0] for t in target_history]) / len(target_history)
+                    avg_target_y = sum([t[1] for t in target_history]) / len(target_history)
+                    
+                    # Deadzone + Dynamic Smoothing Optimization
+                    dx = avg_target_x - ploc_x
+                    dy = avg_target_y - ploc_y
                     dist = math.hypot(dx, dy)
                     
-                    if dist > 3: # Micro-jitter deadzone
-                        cloc_x = ploc_x + dx / SMOOTHING
-                        cloc_y = ploc_y + dy / SMOOTHING
+                    # Smaller deadzone for smoother micro-movements
+                    if dist > 1.5:
+                        # Dynamic smoothing: high for slow/small movements, low for fast/large movements
+                        dynamic_smoothing = SMOOTHING
+                        if dist < 30:
+                            dynamic_smoothing = SMOOTHING * 1.5  # Filter out fine jitter
+                        elif dist > 150:
+                            dynamic_smoothing = SMOOTHING * 0.4  # Snap fast on large movements
+                            
+                        cloc_x = ploc_x + dx / dynamic_smoothing
+                        cloc_y = ploc_y + dy / dynamic_smoothing
                         
                         try:
-                            pyautogui.moveTo(cloc_x, cloc_y, _pause=False)
+                            pyautogui.moveTo(int(cloc_x), int(cloc_y), _pause=False)
                             ploc_x, ploc_y = cloc_x, cloc_y
                         except pyautogui.FailSafeException:
                             pass
+                else:
+                    target_history.clear()
 
                 gesture_history.append(current_gesture)
         else:
             gesture_history.clear()
+            target_history.clear()
 
         # Execute Action 
         if len(gesture_history) == STABILIZATION_FRAMES and len(set(gesture_history)) == 1:
