@@ -93,11 +93,14 @@ def execute_action(gesture):
         
     return action_triggered
 
-def draw_landmarks(img, hand_landmarks):
+def draw_landmarks(img, hand_landmarks, is_active=True):
     h, w, _ = img.shape
+    node_color = (200, 200, 200) if is_active else (80, 80, 80)
+    line_color = (255, 180, 50) if is_active else (80, 80, 80)
+    
     for idx, lm in enumerate(hand_landmarks):
         cx, cy = int(lm.x * w), int(lm.y * h)
-        cv2.circle(img, (cx, cy), 5, (200, 200, 200), cv2.FILLED)
+        cv2.circle(img, (cx, cy), 5, node_color, cv2.FILLED)
         
     connections = [
         (0, 1), (1, 2), (2, 3), (3, 4), 
@@ -111,7 +114,7 @@ def draw_landmarks(img, hand_landmarks):
         point2 = hand_landmarks[connection[1]]
         cx1, cy1 = int(point1.x * w), int(point1.y * h)
         cx2, cy2 = int(point2.x * w), int(point2.y * h)
-        cv2.line(img, (cx1, cy1), (cx2, cy2), (255, 180, 50), 2)
+        cv2.line(img, (cx1, cy1), (cx2, cy2), line_color, 2)
 
 def draw_overlay_text(img, text, pos, font_scale=0.7, color=(255, 255, 255), thickness=2, bg_color=(0,0,0)):
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -124,7 +127,7 @@ def main():
     global gesture_history, last_action_time, ploc_x, ploc_y, target_history
     
     base_options = python.BaseOptions(model_asset_path='hand_landmarker.task')
-    options = vision.HandLandmarkerOptions(base_options=base_options, num_hands=1)
+    options = vision.HandLandmarkerOptions(base_options=base_options, num_hands=2)
     detector = vision.HandLandmarker.create_from_options(options)
 
     cap = cv2.VideoCapture(0)
@@ -159,60 +162,75 @@ def main():
         time_since_last = time.time() - last_action_time
 
         if detection_result.hand_landmarks:
-            for hand_landmarks_list in detection_result.hand_landmarks:
-                draw_landmarks(img, hand_landmarks_list)
+            left_hand_found = False
+            for idx, hand_landmarks_list in enumerate(detection_result.hand_landmarks):
+                # Due to horizontal flipping (cv2.flip), Mediapipe detects the physical Left hand as "Right"
+                hand_label = detection_result.handedness[idx][0].category_name
+                is_physical_left = (hand_label == "Right")
                 
-                fingers = count_fingers(hand_landmarks_list)
-                current_gesture = recognize_gesture(fingers)
-                
-                if current_gesture == "INDEX_UP":
-                    index_tip = hand_landmarks_list[8]
+                if is_physical_left:
+                    left_hand_found = True
+                    draw_landmarks(img, hand_landmarks_list, is_active=True)
                     
-                    # Convert to pixel coordinates
-                    idx_px = index_tip.x * w
-                    idx_py = index_tip.y * h
+                    fingers = count_fingers(hand_landmarks_list)
+                    current_gesture = recognize_gesture(fingers)
                     
-                    # Constrain within the Active Trackpad boundary
-                    box_w = w - 2 * FRAME_REDUCTION
-                    box_h = h - 2 * FRAME_REDUCTION
-                    mx = max(FRAME_REDUCTION, min(idx_px, w - FRAME_REDUCTION))
-                    my = max(FRAME_REDUCTION, min(idx_py, h - FRAME_REDUCTION))
-                    
-                    # Map to full screen coordinates
-                    target_x = ((mx - FRAME_REDUCTION) / box_w) * SCREEN_W
-                    target_y = ((my - FRAME_REDUCTION) / box_h) * SCREEN_H
-                    
-                    # Smooth raw targets slightly with moving average
-                    target_history.append((target_x, target_y))
-                    avg_target_x = sum([t[0] for t in target_history]) / len(target_history)
-                    avg_target_y = sum([t[1] for t in target_history]) / len(target_history)
-                    
-                    # Deadzone + Dynamic Smoothing Optimization
-                    dx = avg_target_x - ploc_x
-                    dy = avg_target_y - ploc_y
-                    dist = math.hypot(dx, dy)
-                    
-                    # Smaller deadzone for smoother micro-movements
-                    if dist > 1.5:
-                        # Dynamic smoothing: high for slow/small movements, low for fast/large movements
-                        dynamic_smoothing = SMOOTHING
-                        if dist < 30:
-                            dynamic_smoothing = SMOOTHING * 1.5  # Filter out fine jitter
-                        elif dist > 150:
-                            dynamic_smoothing = SMOOTHING * 0.4  # Snap fast on large movements
-                            
-                        cloc_x = ploc_x + dx / dynamic_smoothing
-                        cloc_y = ploc_y + dy / dynamic_smoothing
+                    if current_gesture == "INDEX_UP":
+                        index_tip = hand_landmarks_list[8]
                         
-                        try:
-                            pyautogui.moveTo(int(cloc_x), int(cloc_y), _pause=False)
-                            ploc_x, ploc_y = cloc_x, cloc_y
-                        except pyautogui.FailSafeException:
-                            pass
-                else:
-                    target_history.clear()
+                        # Convert to pixel coordinates
+                        idx_px = index_tip.x * w
+                        idx_py = index_tip.y * h
+                        
+                        # Constrain within the Active Trackpad boundary
+                        box_w = w - 2 * FRAME_REDUCTION
+                        box_h = h - 2 * FRAME_REDUCTION
+                        mx = max(FRAME_REDUCTION, min(idx_px, w - FRAME_REDUCTION))
+                        my = max(FRAME_REDUCTION, min(idx_py, h - FRAME_REDUCTION))
+                        
+                        # Map to full screen coordinates
+                        target_x = ((mx - FRAME_REDUCTION) / box_w) * SCREEN_W
+                        target_y = ((my - FRAME_REDUCTION) / box_h) * SCREEN_H
+                        
+                        # Smooth raw targets slightly with moving average
+                        target_history.append((target_x, target_y))
+                        avg_target_x = sum([t[0] for t in target_history]) / len(target_history)
+                        avg_target_y = sum([t[1] for t in target_history]) / len(target_history)
+                        
+                        # Deadzone + Dynamic Smoothing Optimization
+                        dx = avg_target_x - ploc_x
+                        dy = avg_target_y - ploc_y
+                        dist = math.hypot(dx, dy)
+                        
+                        # Smaller deadzone for smoother micro-movements
+                        if dist > 1.5:
+                            # Dynamic smoothing: high for slow/small movements, low for fast/large movements
+                            dynamic_smoothing = SMOOTHING
+                            if dist < 30:
+                                dynamic_smoothing = SMOOTHING * 1.5  # Filter out fine jitter
+                            elif dist > 150:
+                                dynamic_smoothing = SMOOTHING * 0.4  # Snap fast on large movements
+                                
+                            cloc_x = ploc_x + dx / dynamic_smoothing
+                            cloc_y = ploc_y + dy / dynamic_smoothing
+                            
+                            try:
+                                pyautogui.moveTo(int(cloc_x), int(cloc_y), _pause=False)
+                                ploc_x, ploc_y = cloc_x, cloc_y
+                            except pyautogui.FailSafeException:
+                                pass
+                    else:
+                        target_history.clear()
 
-                gesture_history.append(current_gesture)
+                    gesture_history.append(current_gesture)
+                    
+                else:
+                    # Render the right hand as inactive (faded colors)
+                    draw_landmarks(img, hand_landmarks_list, is_active=False)
+                    
+            if not left_hand_found:
+                gesture_history.clear()
+                target_history.clear()
         else:
             gesture_history.clear()
             target_history.clear()
